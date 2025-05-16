@@ -1339,8 +1339,8 @@ class AirRaidRenderer(AtraJaxisRenderer):
         else:
             score_value = (state_or_obs.score // 25) * 25
             
-        score_y = 5  # Use a fixed Y position
-        score_x_start = 56 # Fixed start position for 6 digits
+        score_y = 5 # Use a fixed Y position
+        score_x_start = 30 # Fixed start position for 6 digits
 
         # Get digits padded to a fixed length (6)
         max_digits_render = 6
@@ -1388,8 +1388,8 @@ class AirRaidRenderer(AtraJaxisRenderer):
         # Render the score
         raster = aj.render_label(
             raster,
-            score_y,
             score_x_start,
+            score_y,
             final_digits_to_render,
             self.DIGIT_SPRITES
         )
