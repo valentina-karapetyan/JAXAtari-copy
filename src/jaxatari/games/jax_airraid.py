@@ -596,7 +596,7 @@ class JaxAirRaid(JaxEnvironment[AirRaidState, AirRaidObservation, AirRaidInfo]):
         Resets the game state to the initial state.
         
         Returns:
-            The initial state and observation
+            The initial observation and state
         """
         # Initialize building positions
         building_x = jnp.array([
@@ -624,7 +624,9 @@ class JaxAirRaid(JaxEnvironment[AirRaidState, AirRaidObservation, AirRaidInfo]):
         
         # Initialize random key
         rng = random.PRNGKey(0)
-        
+        if key is not None: # Allow passing a key for reproducibility
+            rng = key
+            
         state = AirRaidState(
             player_x=jnp.array(PLAYER_INITIAL_X),
             player_y=jnp.array(PLAYER_INITIAL_Y),
@@ -645,7 +647,7 @@ class JaxAirRaid(JaxEnvironment[AirRaidState, AirRaidObservation, AirRaidInfo]):
             score=jnp.array(0),
             step_counter=jnp.array(0),
             rng=rng,
-            obs_stack=None
+            obs_stack=None # obs_stack will be initialized below
         )
         
         initial_obs = self._get_observation(state)
@@ -655,40 +657,28 @@ class JaxAirRaid(JaxEnvironment[AirRaidState, AirRaidObservation, AirRaidInfo]):
             return jnp.concatenate([x_expanded] * self.frame_stack_size, axis=0)
         
         # Apply transformation to each leaf in the pytree
-        initial_obs = jax.tree.map(expand_and_copy, initial_obs)
+        initial_obs_stack = jax.tree.map(expand_and_copy, initial_obs)
         
-        new_state = state._replace(obs_stack=initial_obs)
-        return initial_obs, new_state
-    
+        new_state_with_obs_stack = state._replace(obs_stack=initial_obs_stack)
+        
+        # Return (observation, state) - This is the crucial change
+        return initial_obs, new_state_with_obs_stack
+
     @partial(jax.jit, static_argnums=(0,))
-    def step(self, state_or_obs, action: chex.Array) -> Tuple[AirRaidState, AirRaidObservation, float, bool, AirRaidInfo]:
+    def step(self, state: AirRaidState, action: chex.Array) -> Tuple[AirRaidObservation, AirRaidState, float, bool, AirRaidInfo]:
         """
         Steps the game state forward by one frame.
         
         Args:
-            state_or_obs: Current game state or observation
+            state: Current game state
             action: Action to take
             
         Returns:
             Updated game state, observation, reward, done flag, and info
         """
-        # In JAX we can't use isinstance directly in jitted functions, so we'll use a different approach
-
-        # Check if the input has the building_x attribute (which would indicate a state)
-        # This approach is safer in JAX than trying to use isinstance
-        is_state = hasattr(state_or_obs, "building_x")
+        # Always assume state is AirRaidState - remove all type checking code
         
-        if is_state:
-            # We have a state, use it directly
-            state = state_or_obs
-        else:
-            # We have an observation, we need to reset to get a valid state
-            # In a real implementation, you might want to save the last state somewhere
-            # But for now we'll reset and use a fresh state
-            _, state = self.reset()
-            print("Warning: Received observation instead of state. Had to reset the environment.")
-        
-        # Now continue with the regular step logic using the state
+        # Update building positions
         new_building_x = state.building_x + BUILDING_VELOCITY
         new_building_x = jnp.where(
             new_building_x > WIDTH,
@@ -812,20 +802,27 @@ class JaxAirRaid(JaxEnvironment[AirRaidState, AirRaidObservation, AirRaidInfo]):
         all_rewards = self._get_all_reward(state, new_state)
         info = self._get_info(new_state, all_rewards)
         
-        # 11. Get observation and update obs_stack
+        # 11. Get observation
         observation = self._get_observation(new_state)
-        # Stack the new observation, remove the oldest one
-        observation = jax.tree.map(
-            lambda stack, obs: jnp.concatenate([stack[1:], jnp.expand_dims(obs, axis=0)], axis=0),
-            new_state.obs_stack,
+        
+        # Update obs_stack for RL
+        # Ensure new_state.obs_stack is not None before trying to tree_map over it.
+        # This should be initialized correctly in reset.
+        current_obs_stack = new_state.obs_stack
+        
+        # If obs_stack was None (e.g. if reset didn't initialize it properly for some reason, though it should)
+        # We might need a fallback, but ideally, reset handles this.
+        # For safety, let's assume obs_stack is correctly initialized by reset.
+
+        observation_stack = jax.tree.map(
+            lambda stack, obs_leaf: jnp.concatenate([stack[1:], jnp.expand_dims(obs_leaf, axis=0)], axis=0),
+            current_obs_stack, # Use current_obs_stack from new_state
             observation
         )
-        new_state = new_state._replace(obs_stack=observation)
-
-        # Save this state for future steps that might receive observations
-        self._last_state = new_state
+        final_new_state = new_state._replace(obs_stack=observation_stack) # Use a different variable name to avoid confusion
         
-        return new_state, new_state.obs_stack, env_reward, done, info
+        # Return (observation, new_state, reward, done, info) - Correct order for play.py
+        return observation, final_new_state, env_reward, done, info
     
     @partial(jax.jit, static_argnums=(0,))
     def _get_observation(self, state: AirRaidState) -> AirRaidObservation:
