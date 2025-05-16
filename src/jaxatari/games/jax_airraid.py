@@ -1087,16 +1087,13 @@ class AirRaidRenderer(AtraJaxisRenderer):
      ) = load_sprites()
 
     @partial(jax.jit, static_argnums=(0,))
-    def render(self, state):
+    def render(self, state_or_obs):
         """
         Renders the current game state using JAX operations.
-
-        Args:
-            state: An AirRaidState object containing the current game state.
-
-        Returns:
-            A JAX array representing the rendered frame.
         """
+        # Determine if we're receiving a state or observation
+        is_observation = isinstance(state_or_obs, AirRaidObservation)
+        
         # Create empty raster with correct orientation for atraJaxis framework
         raster = jnp.zeros((WIDTH, HEIGHT, 3), dtype=jnp.uint8)
 
@@ -1104,97 +1101,227 @@ class AirRaidRenderer(AtraJaxisRenderer):
         frame_bg = aj.get_sprite_frame(self.SPRITE_BG, 0)
         raster = aj.render_at(raster, 0, 0, frame_bg)
 
+        # Extract scalar values from possibly batched values if necessary
+        def get_scalar(value):
+            # Check if value has more than 0 dimensions and size > 1
+            if hasattr(value, 'shape') and value.ndim > 0 and value.size > 0:
+                # Take the first element if it's an array
+                return value.item() if value.size == 1 else value[0]
+            return value
 
-        # Render buildings using static masks    
-        def render_building(i, raster_in):
-            frame_building = aj.get_sprite_frame(self.SPRITE_BUILDING, 0)
-            damage_level = state.building_damage[i]
-            
-            # Create static masks for each damage level
-            masks = []
-            for h in [16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2]:
-                mask = jnp.zeros((32, 32, 4), dtype=jnp.bool_)
-                mask = mask.at[:h, :, :].set(True)
-                masks.append(mask)
-            
-            # Stack all masks and select the one we need
-            masks = jnp.stack(masks)
-            mask = masks[damage_level]
-            
-            # Apply mask to building sprite
-            masked_sprite = frame_building * mask
-            
-            # Get building position
-            building_x = state.building_x[i]
-            building_y = BUILDING_Y_POSITIONS[damage_level]
-            
-            # Render building
-            return aj.render_at(raster_in, building_x, building_y, masked_sprite)
-   
-         
-        # Use loop to render all buildings
-        raster = jax.lax.fori_loop(0, NUM_BUILDINGS, lambda i, r: render_building(i, r), raster)
+        # Render buildings
+        if is_observation:
+            # For observation, handle buildings with static indexing
+            # Use get_scalar to ensure we have simple integer coordinates
+            if len(state_or_obs.buildings) > 0:
+                frame_building = aj.get_sprite_frame(self.SPRITE_BUILDING, 0)
+                building = state_or_obs.buildings[0]
+                x = get_scalar(building.x)
+                y = get_scalar(building.y)
+                raster = aj.render_at(raster, x, y, frame_building)
+                
+            if len(state_or_obs.buildings) > 1:
+                frame_building = aj.get_sprite_frame(self.SPRITE_BUILDING, 0)
+                building = state_or_obs.buildings[1]
+                x = get_scalar(building.x)
+                y = get_scalar(building.y)
+                raster = aj.render_at(raster, x, y, frame_building)
+                
+            if len(state_or_obs.buildings) > 2:
+                frame_building = aj.get_sprite_frame(self.SPRITE_BUILDING, 0)
+                building = state_or_obs.buildings[2]
+                x = get_scalar(building.x)
+                y = get_scalar(building.y)
+                raster = aj.render_at(raster, x, y, frame_building)
+        else:
+            # For state, use the original detailed rendering with damage levels
+            def render_building(i, raster_in):
+                frame_building = aj.get_sprite_frame(self.SPRITE_BUILDING, 0)
+                damage_level = state_or_obs.building_damage[i]
+                
+                # Get building position
+                building_x = state_or_obs.building_x[i]
+                building_y = BUILDING_Y_POSITIONS[damage_level]
+                
+                # Render building
+                return aj.render_at(raster_in, building_x, building_y, frame_building)
+       
+            # Use loop to render all buildings
+            raster = jax.lax.fori_loop(0, NUM_BUILDINGS, render_building, raster)
 
-
-        # Render enemies using functional style
-        def render_enemy(i, raster_in):
-            # Create conditions for each enemy type
-            is_active = state.enemy_active[i] == 1
-            is_type0 = state.enemy_type[i] == 0
-            is_type1 = state.enemy_type[i] == 1
-            is_type2 = state.enemy_type[i] == 2
-            is_type3 = state.enemy_type[i] == 3
-        
-            # Pre-load all sprite types
-            sprite_25 = aj.get_sprite_frame(self.SPRITE_ENEMY25, 0)
-            sprite_50 = aj.get_sprite_frame(self.SPRITE_ENEMY50, 0)
-            sprite_75 = aj.get_sprite_frame(self.SPRITE_ENEMY75, 0)
-            sprite_100 = aj.get_sprite_frame(self.SPRITE_ENEMY100, 0)
-        
-            # Conditionally choose sprite - will only be used if active
-            enemy_sprite = jnp.where(is_type0, sprite_25,
-                        jnp.where(is_type1, sprite_50,
-                        jnp.where(is_type2, sprite_75, sprite_100)))
-        
-            # Render only if active
-            render_result = aj.render_at(raster_in, state.enemy_x[i], state.enemy_y[i], enemy_sprite)
-            return jnp.where(is_active, render_result, raster_in)
-    
-        # Render all enemies
-        raster = jax.lax.fori_loop(0, TOTAL_ENEMIES, lambda i, r: render_enemy(i, r), raster)
+        # Render enemies
+        if is_observation:
+            # For observation, handle enemies with static indexing
+            for i in range(min(len(state_or_obs.enemies), TOTAL_ENEMIES)):
+                if i < len(state_or_obs.enemies):
+                    enemy = state_or_obs.enemies[i]
+                    
+                    # Convert width/height to scalars
+                    width = get_scalar(enemy.width)
+                    height = get_scalar(enemy.height)
+                    
+                    # Create active condition as a scalar
+                    active_cond = jnp.logical_and(width > 0, height > 0)
+                    
+                    # Pre-load all sprite types
+                    sprite_25 = aj.get_sprite_frame(self.SPRITE_ENEMY25, 0)
+                    sprite_50 = aj.get_sprite_frame(self.SPRITE_ENEMY50, 0)
+                    sprite_100 = aj.get_sprite_frame(self.SPRITE_ENEMY100, 0)
+                    
+                    # Determine sprite type using jnp.where instead of if/else
+                    is_type_25 = width == 16
+                    is_type_50_75 = jnp.logical_and(width == 14, height == 16)
+                    
+                    sprite = jnp.where(
+                        is_type_25, 
+                        sprite_25,
+                        jnp.where(
+                            is_type_50_75,
+                            sprite_50,
+                            sprite_100
+                        )
+                    )
+                    
+                    # Use JAX conditional rendering
+                    def render_enemy(unused):
+                        x_pos = get_scalar(enemy.x)
+                        y_pos = get_scalar(enemy.y)
+                        return aj.render_at(raster, x_pos, y_pos, sprite)
+                    
+                    def no_render(unused):
+                        return raster
+                    
+                    # Use lax.cond instead of if statement
+                    raster = jax.lax.cond(
+                        active_cond,
+                        render_enemy,
+                        no_render,
+                        operand=None
+                    )
+        else:
+            # Original enemy rendering for state
+            def render_enemy(i, raster_in):
+                # Create conditions for each enemy type
+                is_active = state_or_obs.enemy_active[i] == 1
+                is_type0 = state_or_obs.enemy_type[i] == 0
+                is_type1 = state_or_obs.enemy_type[i] == 1
+                is_type2 = state_or_obs.enemy_type[i] == 2
+                is_type3 = state_or_obs.enemy_type[i] == 3
+            
+                # Pre-load all sprite types
+                sprite_25 = aj.get_sprite_frame(self.SPRITE_ENEMY25, 0)
+                sprite_50 = aj.get_sprite_frame(self.SPRITE_ENEMY50, 0)
+                sprite_75 = aj.get_sprite_frame(self.SPRITE_ENEMY75, 0)
+                sprite_100 = aj.get_sprite_frame(self.SPRITE_ENEMY100, 0)
+            
+                # Conditionally choose sprite - will only be used if active
+                enemy_sprite = jnp.where(is_type0, sprite_25,
+                            jnp.where(is_type1, sprite_50,
+                            jnp.where(is_type2, sprite_75, sprite_100)))
+            
+                # Render only if active
+                render_result = aj.render_at(raster_in, state_or_obs.enemy_x[i], state_or_obs.enemy_y[i], enemy_sprite)
+                return jnp.where(is_active, render_result, raster_in)
+            
+            # Render all enemies
+            raster = jax.lax.fori_loop(0, TOTAL_ENEMIES, render_enemy, raster)
 
         # Render player
         frame_player = aj.get_sprite_frame(self.SPRITE_PLAYER, 0)
-        raster = aj.render_at(raster, state.player_x, state.player_y, frame_player)
+        if is_observation:
+            x = get_scalar(state_or_obs.player.x)
+            y = get_scalar(state_or_obs.player.y)
+            raster = aj.render_at(raster, x, y, frame_player)
+        else:
+            raster = aj.render_at(raster, state_or_obs.player_x, state_or_obs.player_y, frame_player)
 
         # Render player missiles
-        def render_player_missile(i, raster_in):
-            frame_missile = aj.get_sprite_frame(self.SPRITE_MISSILE, 0)
-            render_result = aj.render_at(raster_in, state.player_missile_x[i], state.player_missile_y[i], frame_missile)
-            return jnp.where(state.player_missile_active[i] == 1, render_result, raster_in)
-    
-        raster = jax.lax.fori_loop(0, NUM_PLAYER_MISSILES, lambda i, r: render_player_missile(i, r), raster)
+        if is_observation:
+            # For observation, use static indexing
+            for i in range(min(len(state_or_obs.player_missiles), NUM_PLAYER_MISSILES)):
+                if i < len(state_or_obs.player_missiles):
+                    missile = state_or_obs.player_missiles[i]
+                    
+                    # Get scalar values and create condition
+                    width = get_scalar(missile.width)
+                    height = get_scalar(missile.height)
+                    active_cond = jnp.logical_and(width > 0, height > 0)
+                    
+                    # Define render functions for conditional
+                    def render_missile(unused):
+                        x_pos = get_scalar(missile.x)
+                        y_pos = get_scalar(missile.y)
+                        frame_missile = aj.get_sprite_frame(self.SPRITE_MISSILE, 0)
+                        return aj.render_at(raster, x_pos, y_pos, frame_missile)
+                        
+                    def no_render(unused):
+                        return raster
+                    
+                    # Use lax.cond instead of if statement
+                    raster = jax.lax.cond(
+                        active_cond,
+                        render_missile,
+                        no_render,
+                        operand=None
+                    )
+        else:
+            def render_player_missile(i, raster_in):
+                frame_missile = aj.get_sprite_frame(self.SPRITE_MISSILE, 0)
+                render_result = aj.render_at(raster_in, state_or_obs.player_missile_x[i], 
+                                            state_or_obs.player_missile_y[i], frame_missile)
+                return jnp.where(state_or_obs.player_missile_active[i] == 1, render_result, raster_in)
+        
+            raster = jax.lax.fori_loop(0, NUM_PLAYER_MISSILES, render_player_missile, raster)
 
         # Render enemy missiles
-        def render_enemy_missile(i, raster_in):
-            frame_missile = aj.get_sprite_frame(self.SPRITE_MISSILE, 0)
-            render_result = aj.render_at(raster_in, state.enemy_missile_x[i], state.enemy_missile_y[i], frame_missile)
-            return jnp.where(state.enemy_missile_active[i] == 1, render_result, raster_in)
-    
-        raster = jax.lax.fori_loop(0, NUM_ENEMY_MISSILES, lambda i, r: render_enemy_missile(i, r), raster)
+        if is_observation:
+            # For observation, use static indexing for enemy missiles too
+            for i in range(min(len(state_or_obs.enemy_missiles), NUM_ENEMY_MISSILES)):
+                if i < len(state_or_obs.enemy_missiles):
+                    missile = state_or_obs.enemy_missiles[i]
+                    
+                    # Get scalar values and create condition
+                    width = get_scalar(missile.width)
+                    height = get_scalar(missile.height)
+                    active_cond = jnp.logical_and(width > 0, height > 0)
+                    
+                    # Define render functions for conditional
+                    def render_missile(unused):
+                        x_pos = get_scalar(missile.x)
+                        y_pos = get_scalar(missile.y)
+                        frame_missile = aj.get_sprite_frame(self.SPRITE_MISSILE, 0)
+                        return aj.render_at(raster, x_pos, y_pos, frame_missile)
+                        
+                    def no_render(unused):
+                        return raster
+                    
+                    # Use lax.cond instead of if statement
+                    raster = jax.lax.cond(
+                        active_cond,
+                        render_missile,
+                        no_render,
+                        operand=None
+                    )
+        else:
+            def render_enemy_missile(i, raster_in):
+                frame_missile = aj.get_sprite_frame(self.SPRITE_MISSILE, 0)
+                render_result = aj.render_at(raster_in, state_or_obs.enemy_missile_x[i], 
+                                            state_or_obs.enemy_missile_y[i], frame_missile)
+                return jnp.where(state_or_obs.enemy_missile_active[i] == 1, render_result, raster_in)
+        
+            raster = jax.lax.fori_loop(0, NUM_ENEMY_MISSILES, render_enemy_missile, raster)
 
-
-        # Add black bar at the bottom (140px height)
+        # Add black bar at the bottom
         black_bar_height = 20
         black_bar_y = HEIGHT - black_bar_height
-        #black_bar = jnp.zeros((WIDTH, black_bar_height, 4), dtype=jnp.uint8)
-        #black_bar = black_bar.at[:, :, 3].set(255)  # Set alpha channel to fully opaque
-        #raster = aj.render_at(raster, 0, black_bar_y, black_bar)
         raster = raster.at[:, black_bar_y:, :].set(0)  # Set to black (0,0,0)
 
-        # Render score - Mimicking OCAtari alignment via fixed-width rendering
-        # Ensure score is multiple of 25
-        score_value = (state.score // 25) * 25
+        # Render score
+        if is_observation:
+            score_value = get_scalar(state_or_obs.score)
+        else:
+            score_value = (state_or_obs.score // 25) * 25
+            
         score_y = 5  # Use a fixed Y position
         score_x_start = 56 # Fixed start position for 6 digits
 
@@ -1215,49 +1342,40 @@ class AirRaidRenderer(AtraJaxisRenderer):
             0, max_digits_render, get_digits_body, (padded_digits_render, score_value)
         )
 
-        # --- Start: Conditional Visibility Logic ---
         # Determine which digits should be visible based on score value
         is_score_zero = (score_value == 0)
         indices = jnp.arange(max_digits_render) # [0, 1, 2, 3, 4, 5]
 
         # Find the index of the first significant digit (first non-zero)
         is_significant = (padded_digits_render > 0)
-        # Assign a large index (max_digits_render) if a digit is not significant
+        # Assign a large index if a digit is not significant
         temp_indices = jnp.where(is_significant, indices, max_digits_render)
         # The minimum of these temp indices is the index of the first significant digit
-        # If score is 0, all digits are 0, is_significant is all False,
-        # temp_indices is all 6, and first_significant_idx becomes 6.
         first_significant_idx = jnp.min(temp_indices)
 
-        # Determine visibility mask:
-        # If score is 0, only the last digit (index 5) should be visible (as '0').
+        # Determine visibility mask
         visible_if_zero = (indices == max_digits_render - 1)
-        # If score is > 0, digits from the first significant one onwards should be visible.
         visible_if_nonzero = (indices >= first_significant_idx)
 
-        # Combine conditions using jnp.where based on whether the score is zero
+        # Combine conditions
         should_be_visible = jnp.where(is_score_zero, visible_if_zero, visible_if_nonzero)
 
         # Select final digit indices to render
-        invisible_digit_index = 10 # The index of our transparent/background sprite
+        invisible_digit_index = 10 # Transparent sprite index
         final_digits_to_render = jnp.where(
             should_be_visible,
             padded_digits_render,      # Use the actual calculated digit if visible
             invisible_digit_index      # Use the invisible index if not visible
         )
-        # --- End: Conditional Visibility Logic ---
 
-        # Render using the 6 potentially modified digits and the fixed start x position.
-        # The invisible digits (index 10) will be rendered transparently/as background.
-        # Actual zeros within the score (e.g., in 600) or the single 0 for score=0 will use index 0.
+        # Render the score
         raster = aj.render_label(
             raster,
             score_y,
             score_x_start,
-            final_digits_to_render, # Pass the array with potentially invisible indices
-            self.DIGIT_SPRITES      # Ensure DIGIT_SPRITES[10] is the invisible sprite
+            final_digits_to_render,
+            self.DIGIT_SPRITES
         )
-
 
         # Render lives
         def render_life(i, raster_in):
@@ -1276,74 +1394,12 @@ class AirRaidRenderer(AtraJaxisRenderer):
             result = aj.render_at(raster_in, icon_x, life_y, life_sprite)
 
             # Only show the life icon if the player has enough lives
-            return jnp.where(i < state.player_lives, result, raster_in)
+            if is_observation:
+                lives = get_scalar(state_or_obs.lives)
+                return jnp.where(i < lives, result, raster_in)
+            else:
+                return jnp.where(i < state_or_obs.player_lives, result, raster_in)
 
-        raster = jax.lax.fori_loop(0, 5, lambda i, r: render_life(i, r), raster)
+        raster = jax.lax.fori_loop(0, 5, render_life, raster)
 
         return raster
-
-
-"""if __name__ == "__main__":
-    # Initialize Pygame
-    pygame.init()
-    WINDOW_WIDTH = 160 * 3
-    WINDOW_HEIGHT = 210 * 3
-    screen = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT))
-    pygame.display.set_caption("Air Raid Game")
-    clock = pygame.time.Clock()
-
-    # Create the game instance
-    game = JaxAirRaid(frameskip=1)
-
-    # Create the JAX renderer
-    renderer = AirRaidRenderer()
-
-    # Get jitted functions
-    jitted_step = jax.jit(game.step)
-    jitted_reset = jax.jit(game.reset)
-
-    # Initialize game state
-    obs, curr_state = jitted_reset()
-
-    # Game loop
-    running = True
-    frame_by_frame = False
-    frameskip = game.frameskip
-    counter = 1
-
-    while running:
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                running = False
-            elif event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_f:
-                    frame_by_frame = not frame_by_frame
-            elif event.type == pygame.KEYDOWN or (
-                    event.type == pygame.KEYUP and event.key == pygame.K_n
-            ):
-                if event.key == pygame.K_n and frame_by_frame:
-                    if counter % frameskip == 0:
-                        action = get_human_action()
-                        curr_state, obs, reward, done, info = jitted_step(
-                            curr_state, action
-                        )
-
-        if not frame_by_frame:
-            if counter % frameskip == 0:
-                action = get_human_action()
-                curr_state, obs, reward, done, info = jitted_step(curr_state, action)
-                
-                # Reset if game is done
-                if done:
-                    obs, curr_state = jitted_reset()
-                   
-        # Render and display
-        raster = renderer.render(curr_state)
-
-        # Update pygame display
-        aj.update_pygame(screen, raster, 3, WIDTH, HEIGHT)
-
-        counter += 1
-        clock.tick(60)
-
-    pygame.quit() """
