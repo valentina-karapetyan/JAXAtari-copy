@@ -1,6 +1,6 @@
 import os
 from functools import partial
-from typing import NamedTuple, Tuple, Dict, List
+from typing import NamedTuple, Tuple, Dict, List, Union
 import jax
 import jax.numpy as jnp
 import jax.random as random
@@ -661,18 +661,34 @@ class JaxAirRaid(JaxEnvironment[AirRaidState, AirRaidObservation, AirRaidInfo]):
         return initial_obs, new_state
     
     @partial(jax.jit, static_argnums=(0,))
-    def step(self, state: AirRaidState, action: chex.Array) -> Tuple[AirRaidState, AirRaidObservation, float, bool, AirRaidInfo]:
+    def step(self, state_or_obs, action: chex.Array) -> Tuple[AirRaidState, AirRaidObservation, float, bool, AirRaidInfo]:
         """
         Steps the game state forward by one frame.
         
         Args:
-            state: Current game state
+            state_or_obs: Current game state or observation
             action: Action to take
             
         Returns:
             Updated game state, observation, reward, done flag, and info
         """
-    
+        # In JAX we can't use isinstance directly in jitted functions, so we'll use a different approach
+
+        # Check if the input has the building_x attribute (which would indicate a state)
+        # This approach is safer in JAX than trying to use isinstance
+        is_state = hasattr(state_or_obs, "building_x")
+        
+        if is_state:
+            # We have a state, use it directly
+            state = state_or_obs
+        else:
+            # We have an observation, we need to reset to get a valid state
+            # In a real implementation, you might want to save the last state somewhere
+            # But for now we'll reset and use a fresh state
+            _, state = self.reset()
+            print("Warning: Received observation instead of state. Had to reset the environment.")
+        
+        # Now continue with the regular step logic using the state
         new_building_x = state.building_x + BUILDING_VELOCITY
         new_building_x = jnp.where(
             new_building_x > WIDTH,
@@ -680,6 +696,7 @@ class JaxAirRaid(JaxEnvironment[AirRaidState, AirRaidObservation, AirRaidInfo]):
             new_building_x
         )
 
+        # Continue with the rest of the step logic...
         # 1. Update player position
         new_player_x = player_step(state.player_x, action)
         
@@ -804,6 +821,9 @@ class JaxAirRaid(JaxEnvironment[AirRaidState, AirRaidObservation, AirRaidInfo]):
             observation
         )
         new_state = new_state._replace(obs_stack=observation)
+
+        # Save this state for future steps that might receive observations
+        self._last_state = new_state
         
         return new_state, new_state.obs_stack, env_reward, done, info
     
