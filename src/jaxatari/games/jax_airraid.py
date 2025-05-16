@@ -9,7 +9,7 @@ import pygame
 from gymnax.environments import spaces
 
 from jaxatari.rendering import atraJaxis as aj
-from jaxatari.environment import JaxEnvironment
+from jaxatari.environment import JaxEnvironment, JAXAtariAction
 from jaxatari.renderers import AtraJaxisRenderer 
 
 # Constants for game environment
@@ -69,12 +69,12 @@ ENEMY_MISSILE_SPEED = 4    # Moving down is positive Y
 ENEMY_FIRE_PROB = 0.02     # Probability of an enemy firing per step
 
 # Action constants
-NOOP = 0
-FIRE = 1
-RIGHT = 2
-LEFT = 3
-RIGHTFIRE = 4
-LEFTFIRE = 5
+NOOP = JAXAtariAction.NOOP
+FIRE = JAXAtariAction.FIRE
+RIGHT = JAXAtariAction.RIGHT
+LEFT = JAXAtariAction.LEFT
+RIGHTFIRE = JAXAtariAction.RIGHTFIRE
+LEFTFIRE = JAXAtariAction.LEFTFIRE
 
 # Background color
 BACKGROUND_COLOR = (144, 72, 17)
